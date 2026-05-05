@@ -774,6 +774,7 @@ Object pair(s):
                     f"{room_node.caption}: visited {len(room_node.memory)}x, "
                     f"coverage={last.get('coverage','?')}, "
                     f"priority={last.get('priority','?')}, "
+                    f"confidence={last.get('confidence','?')}, "
                     f"note={last.get('note','')}"
                 )
         return '\n'.join(lines)

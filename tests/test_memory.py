@@ -98,7 +98,7 @@ def test_build_room_memory_text_with_record():
     RoomNode = sg_mod.RoomNode
 
     bedroom = RoomNode('bedroom')
-    bedroom.memory = [{'coverage': 'partial', 'priority': 'medium', 'note': 'left corner unexplored'}]
+    bedroom.memory = [{'coverage': 'partial', 'priority': 'medium', 'confidence': 'low', 'note': 'left corner unexplored'}]
 
     class FakeSG:
         room_nodes = [bedroom, RoomNode('kitchen')]
@@ -107,4 +107,58 @@ def test_build_room_memory_text_with_record():
     result = FakeSG._build_room_memory_text(FakeSG)
     assert 'bedroom' in result
     assert 'partial' in result
+    assert 'low' in result
     assert 'kitchen' not in result   # kitchen has no memory
+
+
+def test_build_room_memory_text_multi_room_all_have_memory():
+    sg_mod = importlib.import_module('scenegraph')
+    RoomNode = sg_mod.RoomNode
+    r1 = RoomNode('bedroom')
+    r1.memory = [{'coverage': 'full', 'priority': 'low', 'confidence': 'high', 'note': 'done'}]
+    r2 = RoomNode('kitchen')
+    r2.memory = [{'coverage': 'partial', 'priority': 'high', 'confidence': 'medium', 'note': 'chair seen'}]
+
+    class FakeSG:
+        room_nodes = [r1, r2]
+        _build_room_memory_text = sg_mod.SceneGraph._build_room_memory_text
+
+    result = FakeSG._build_room_memory_text(FakeSG)
+    lines = result.split('\n')
+    assert len(lines) == 2
+    assert lines[0].startswith('bedroom')
+    assert lines[1].startswith('kitchen')
+
+
+def test_build_room_memory_text_uses_last_record_and_visit_count():
+    sg_mod = importlib.import_module('scenegraph')
+    RoomNode = sg_mod.RoomNode
+    r = RoomNode('kitchen')
+    r.memory = [
+        {'coverage': 'full', 'priority': 'low', 'confidence': 'high', 'note': 'first visit'},
+        {'coverage': 'minimal', 'priority': 'high', 'confidence': 'low', 'note': 'second visit'},
+    ]
+
+    class FakeSG:
+        room_nodes = [r]
+        _build_room_memory_text = sg_mod.SceneGraph._build_room_memory_text
+
+    result = FakeSG._build_room_memory_text(FakeSG)
+    assert 'visited 2x' in result
+    assert 'minimal' in result   # last record, not first
+    assert 'second visit' in result
+
+
+def test_build_room_memory_text_missing_keys_fall_back_to_question_mark():
+    sg_mod = importlib.import_module('scenegraph')
+    RoomNode = sg_mod.RoomNode
+    r = RoomNode('bathroom')
+    r.memory = [{'note': 'only note present'}]
+
+    class FakeSG:
+        room_nodes = [r]
+        _build_room_memory_text = sg_mod.SceneGraph._build_room_memory_text
+
+    result = FakeSG._build_room_memory_text(FakeSG)
+    assert 'coverage=?' in result
+    assert 'priority=?' in result
