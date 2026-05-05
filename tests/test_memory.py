@@ -348,3 +348,50 @@ def test_insert_goal_does_not_trigger_llm_b_for_unvisited_rooms():
     assert kitchen.status == 'unvisited'
     assert bathroom.status == 'unvisited'
     assert bedroom.status == 'active'
+
+
+def test_run_llm_b_includes_node_captions_from_snapshot():
+    """_run_llm_b uses nodes_snapshot captions in the formatted prompt."""
+    sg_mod = importlib.import_module('scenegraph')
+    RoomNode = sg_mod.RoomNode
+    import unittest.mock as mock
+
+    kitchen = RoomNode('kitchen')
+
+    # Build fake ObjectNode-like objects with a caption attribute
+    fake_node_1 = mock.MagicMock()
+    fake_node_1.caption = 'refrigerator'
+    fake_node_2 = mock.MagicMock()
+    fake_node_2.caption = 'stove'
+    nodes_snapshot = [fake_node_1, fake_node_2]
+
+    llm_response = (
+        "coverage: full\n"
+        "priority: low\n"
+        "confidence: high\n"
+        "note: both appliances clearly visible\n"
+        "other_floors_detected: no"
+    )
+
+    captured_prompt = {}
+
+    def capture_prompt(prompt):
+        captured_prompt['text'] = prompt
+        return llm_response
+
+    class FakeSG:
+        obj_goal_sg = 'chair'
+        global_memory = {'other_floors': False, 'staircase_pos': None}
+        prompt_llm_b = (
+            "Goal object: {goal}\nRoom: {room}\n"
+            "Objects found in room: {objects}\nPrevious records: {prev}\n"
+        )
+        get_llm_response = capture_prompt
+        _run_llm_b = sg_mod.SceneGraph._run_llm_b
+
+    FakeSG._run_llm_b(FakeSG, kitchen, nodes_snapshot)
+
+    assert 'refrigerator' in captured_prompt['text']
+    assert 'stove' in captured_prompt['text']
+    assert len(kitchen.memory) == 1
+    assert kitchen.memory[0]['coverage'] == 'full'

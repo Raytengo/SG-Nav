@@ -240,6 +240,8 @@ Object pair(s):
         self.edge_text = ''
         self.edge_list = []
         self.reason_visualization = ''
+        self.global_memory = {'other_floors': False, 'staircase_pos': None}
+        self._llm_b_thread = None
 
     def set_cfg(self):
         cfg = {'dataset_config': PosixPath('tools/replica.yaml'), 'scene_id': 'room0', 'start': 0, 'end': -1, 'stride': 5, 'image_height': 680, 'image_width': 1200, 'gsa_variant': 'none', 'detection_folder_name': 'gsa_detections_${gsa_variant}', 'det_vis_folder_name': 'gsa_vis_${gsa_variant}', 'color_file_name': 'gsa_classes_${gsa_variant}', 'device': 'cuda', 'use_iou': True, 'spatial_sim_type': 'overlap', 'phys_bias': 0.0, 'match_method': 'sim_sum', 'semantic_threshold': 0.5, 'physical_threshold': 0.5, 'sim_threshold': 1.2, 'use_contain_number': False, 'contain_area_thresh': 0.95, 'contain_mismatch_penalty': 0.5, 'mask_area_threshold': 25, 'mask_conf_threshold': 0.95, 'max_bbox_area_ratio': 0.5, 'skip_bg': True, 'min_points_threshold': 16, 'downsample_voxel_size': 0.025, 'dbscan_remove_noise': True, 'dbscan_eps': 0.1, 'dbscan_min_points': 10, 'obj_min_points': 0, 'obj_min_detections': 3, 'merge_overlap_thresh': 0.7, 'merge_visual_sim_thresh': 0.8, 'merge_text_sim_thresh': 0.8, 'denoise_interval': 20, 'filter_interval': -1, 'merge_interval': 20, 'save_pcd': True, 'save_suffix': 'overlap_maskconf0.95_simsum1.2_dbscan.1_merge20_masksub', 'vis_render': False, 'debug_render': False, 'class_agnostic': True, 'save_objects_all_frames': True, 'render_camera_path': 'replica_room0.json', 'max_num_points': 512}
@@ -762,6 +764,9 @@ Object pair(s):
             if len(room_node.group_nodes) > 0 and room_node.caption.lower() in response:
                 predict_room_node = room_node
         if predict_room_node is None:
+            # No room matched — status transitions are skipped this round.
+            # Any room currently 'active' stays 'active' and will transition to
+            # 'abandoned' (triggering LLM B) on the next successful call.
             return None
 
         # LLM B fires only when a room transitions active→abandoned (was chosen last
