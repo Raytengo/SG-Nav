@@ -162,3 +162,73 @@ def test_build_room_memory_text_missing_keys_fall_back_to_question_mark():
     result = FakeSG._build_room_memory_text(FakeSG)
     assert 'coverage=?' in result
     assert 'priority=?' in result
+
+
+def test_run_llm_b_appends_record():
+    """_run_llm_b writes a dict to room_node.memory."""
+    import unittest.mock as mock
+    sg_mod = importlib.import_module('scenegraph')
+    RoomNode = sg_mod.RoomNode
+
+    kitchen = RoomNode('kitchen')
+    kitchen.nodes = set()  # no objects
+
+    llm_response = (
+        "coverage: partial\n"
+        "priority: medium\n"
+        "confidence: low\n"
+        "note: left corner not explored\n"
+        "other_floors_detected: no"
+    )
+
+    class FakeSG:
+        obj_goal_sg = 'chair'
+        global_memory = {'other_floors': False, 'staircase_pos': None}
+        prompt_llm_b = (
+            "Goal object: {goal}\nRoom: {room}\nObjects found in room: {objects}\n"
+            "Previous records for this room: {prev}\n\n"
+            "coverage: <full|partial|minimal>\npriority: <high|medium|low>\n"
+            "confidence: <high|medium|low>\nnote: <one sentence>\nother_floors_detected: <yes|no>"
+        )
+        get_llm_response = mock.Mock(return_value=llm_response)
+        _run_llm_b = sg_mod.SceneGraph._run_llm_b
+
+    FakeSG._run_llm_b(FakeSG, kitchen)
+    assert len(kitchen.memory) == 1
+    record = kitchen.memory[0]
+    assert record['coverage'] == 'partial'
+    assert record['priority'] == 'medium'
+    assert record['confidence'] == 'low'
+    assert record['other_floors_detected'] == 'no'
+    assert FakeSG.global_memory['other_floors'] is False
+
+
+def test_run_llm_b_updates_global_memory_on_staircase():
+    """_run_llm_b sets other_floors=True when LLM B detects other floors."""
+    import unittest.mock as mock
+    sg_mod = importlib.import_module('scenegraph')
+    RoomNode = sg_mod.RoomNode
+
+    hallway = RoomNode('living room')
+    hallway.nodes = set()
+
+    llm_response = (
+        "coverage: minimal\n"
+        "priority: low\n"
+        "confidence: low\n"
+        "note: staircase visible at far end\n"
+        "other_floors_detected: yes"
+    )
+
+    class FakeSG:
+        obj_goal_sg = 'chair'
+        global_memory = {'other_floors': False, 'staircase_pos': None}
+        prompt_llm_b = (
+            "Goal object: {goal}\nRoom: {room}\nObjects found in room: {objects}\n"
+            "Previous records for this room: {prev}\n"
+        )
+        get_llm_response = mock.Mock(return_value=llm_response)
+        _run_llm_b = sg_mod.SceneGraph._run_llm_b
+
+    FakeSG._run_llm_b(FakeSG, hallway)
+    assert FakeSG.global_memory['other_floors'] is True

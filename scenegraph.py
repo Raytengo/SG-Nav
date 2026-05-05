@@ -779,6 +779,30 @@ Object pair(s):
                 )
         return '\n'.join(lines)
 
+    def _run_llm_b(self, room_node):
+        objects_text = ', '.join(n.caption for n in room_node.nodes) or 'none'
+        prev_text = str(room_node.memory[-1]) if room_node.memory else 'none'
+        prompt = self.prompt_llm_b.format(
+            goal=self.obj_goal_sg,
+            room=room_node.caption,
+            objects=objects_text,
+            prev=prev_text,
+        )
+        response = self.get_llm_response(prompt)
+        record = {'visit': len(room_node.memory) + 1}
+        for line in response.strip().split('\n'):
+            if ':' in line:
+                key, _, val = line.partition(':')
+                record[key.strip()] = val.strip()
+        room_node.memory.append(record)
+        if record.get('other_floors_detected', 'no').lower() == 'yes':
+            self.global_memory['other_floors'] = True
+
+    def _trigger_llm_b(self, room_node):
+        t = threading.Thread(target=self._run_llm_b, args=(room_node,), daemon=True)
+        t.start()
+        self._llm_b_thread = t
+
     def update_scenegraph(self):
         print(f'Navigate Step: {self.navigate_steps}', end='\r')
         self.segment2d()
