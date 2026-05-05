@@ -46,13 +46,14 @@ def make_scenegraph():
         g.room_nodes = [RoomNode('bedroom'), RoomNode('kitchen')]
         g.llm_name = 'test'
         # call only the portion we care about
-        g.global_memory = None
+        g.global_memory = {'other_floors': False, 'staircase_pos': None}
         g._llm_b_thread = None
     return g
 
 
 def test_scenegraph_has_global_memory():
     # Re-import after code change
+    import inspect
     importlib.invalidate_caches()
     sg_mod = importlib.import_module('scenegraph')
     SceneGraph = sg_mod.SceneGraph
@@ -70,3 +71,9 @@ def test_scenegraph_has_global_memory():
 
     assert g.global_memory == {'other_floors': False, 'staircase_pos': None}
     assert g._llm_b_thread is None
+
+    # Verify prompt_llm_b is assigned in __init__ with required placeholders
+    init_src = inspect.getsource(SceneGraph.__init__)
+    assert 'prompt_llm_b' in init_src, "__init__ must assign self.prompt_llm_b"
+    assert '{goal}' in init_src, "prompt_llm_b must contain {goal} placeholder"
+    assert '{objects}' in init_src, "prompt_llm_b must contain {objects} placeholder"
