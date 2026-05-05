@@ -38,6 +38,8 @@ class RoomNode():
         self.exploration_level = 0
         self.nodes = set()
         self.group_nodes = []
+        self.memory = []          # list of dicts written by LLM B
+        self.status = 'unvisited' # 'unvisited' | 'active' | 'abandoned'
 
 
 class GroupNode():
