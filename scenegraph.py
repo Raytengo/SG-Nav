@@ -746,10 +746,15 @@ Object pair(s):
         for room_node in self.room_nodes:
             if len(room_node.group_nodes) > 0:
                 room_node_text = room_node_text + room_node.caption + ','
-        # room_node_text[-2] = '.'
         if room_node_text == '':
             return None
+
         prompt = self.prompt_room_predict.format(goal, room_node_text)
+        memory_text = self._build_room_memory_text()
+        if memory_text:
+            global_line = "other floors detected: yes" if self.global_memory['other_floors'] else "other floors detected: no"
+            prompt += f"\n\n{global_line}\nPast exploration:\n{memory_text}"
+
         response = self.get_llm_response(prompt=prompt)
         response = response.lower()
         predict_room_node = None
@@ -758,6 +763,19 @@ Object pair(s):
                 predict_room_node = room_node
         if predict_room_node is None:
             return None
+
+        # LLM B fires only when a room transitions active→abandoned (was chosen last
+        # round, not chosen this round). 'unvisited' rooms are skipped, ensuring at
+        # most one LLM B call per insert_goal() invocation.
+        for room_node in self.room_nodes:
+            if len(room_node.group_nodes) == 0:
+                continue
+            if room_node is predict_room_node:
+                room_node.status = 'active'
+            elif room_node.status == 'active':
+                room_node.status = 'abandoned'
+                self._trigger_llm_b(room_node)
+
         for group_node in predict_room_node.group_nodes:
             corr_score = self.graph_corr(goal, group_node)
             group_node.corr_score = corr_score

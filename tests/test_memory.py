@@ -232,3 +232,119 @@ def test_run_llm_b_updates_global_memory_on_staircase():
 
     FakeSG._run_llm_b(FakeSG, hallway, [])
     assert FakeSG.global_memory['other_floors'] is True
+
+
+def test_insert_goal_sets_chosen_room_active():
+    """The room chosen by insert_goal gets status='active'."""
+    sg_mod = importlib.import_module('scenegraph')
+    RoomNode = sg_mod.RoomNode
+    import unittest.mock as mock
+
+    bedroom = RoomNode('bedroom')
+    bedroom.group_nodes = [mock.MagicMock()]   # non-empty = has content
+
+    kitchen = RoomNode('kitchen')
+    kitchen.group_nodes = []
+
+    class FakeSG:
+        obj_goal_sg = 'chair'
+        room_nodes = [bedroom, kitchen]
+        global_memory = {'other_floors': False, 'staircase_pos': None}
+        prompt_room_predict = 'Which room for [{}] in [{}]. Only answer the room.'
+        get_llm_response = mock.Mock(return_value='bedroom')
+        graph_corr = mock.Mock(return_value=0.8)
+        update_group = mock.Mock()
+        _build_room_memory_text = mock.Mock(return_value='')
+        _trigger_llm_b = mock.Mock()
+        insert_goal = sg_mod.SceneGraph.insert_goal
+
+    bedroom.group_nodes[0].corr_score = 0
+    bedroom.group_nodes[0].center = [10, 20]
+
+    FakeSG.insert_goal(FakeSG)
+    assert bedroom.status == 'active'
+    assert kitchen.status == 'unvisited'   # no content, untouched
+
+
+def test_insert_goal_triggers_llm_b_on_active_to_abandoned():
+    """A room that was 'active' and is not chosen this round triggers LLM B."""
+    sg_mod = importlib.import_module('scenegraph')
+    RoomNode = sg_mod.RoomNode
+    import unittest.mock as mock
+
+    bedroom = RoomNode('bedroom')
+    bedroom.group_nodes = [mock.MagicMock()]
+    bedroom.status = 'active'              # was chosen last round
+
+    kitchen = RoomNode('kitchen')
+    kitchen.group_nodes = [mock.MagicMock()]
+    kitchen.status = 'unvisited'
+
+    class FakeSG:
+        obj_goal_sg = 'chair'
+        room_nodes = [bedroom, kitchen]
+        global_memory = {'other_floors': False, 'staircase_pos': None}
+        prompt_room_predict = 'Which room for [{}] in [{}]. Only answer the room.'
+        get_llm_response = mock.Mock(return_value='kitchen')  # LLM picks kitchen
+        graph_corr = mock.Mock(return_value=0.5)
+        update_group = mock.Mock()
+        _build_room_memory_text = mock.Mock(return_value='')
+        _trigger_llm_b = mock.Mock()
+        insert_goal = sg_mod.SceneGraph.insert_goal
+
+    kitchen.group_nodes[0].corr_score = 0
+    kitchen.group_nodes[0].center = [5, 5]
+
+    FakeSG.insert_goal(FakeSG)
+
+    assert bedroom.status == 'abandoned'
+    FakeSG._trigger_llm_b.assert_called_once_with(bedroom)
+    assert kitchen.status == 'active'
+
+
+def test_insert_goal_does_not_trigger_llm_b_for_unvisited_rooms():
+    """Rooms with content but status='unvisited' must NOT trigger LLM B when not chosen.
+
+    Without this guard, 5 un-chosen rooms would each fire LLM B every round,
+    making the async design slower than the synchronous baseline.
+    """
+    sg_mod = importlib.import_module('scenegraph')
+    RoomNode = sg_mod.RoomNode
+    import unittest.mock as mock
+
+    # bedroom: chosen this round
+    bedroom = RoomNode('bedroom')
+    bedroom.group_nodes = [mock.MagicMock()]
+    bedroom.status = 'unvisited'
+
+    # kitchen, bathroom: have content but were NEVER chosen (status stays 'unvisited')
+    kitchen = RoomNode('kitchen')
+    kitchen.group_nodes = [mock.MagicMock()]
+    kitchen.status = 'unvisited'
+
+    bathroom = RoomNode('bathroom')
+    bathroom.group_nodes = [mock.MagicMock()]
+    bathroom.status = 'unvisited'
+
+    class FakeSG:
+        obj_goal_sg = 'chair'
+        room_nodes = [bedroom, kitchen, bathroom]
+        global_memory = {'other_floors': False, 'staircase_pos': None}
+        prompt_room_predict = 'Which room for [{}] in [{}]. Only answer the room.'
+        get_llm_response = mock.Mock(return_value='bedroom')
+        graph_corr = mock.Mock(return_value=0.7)
+        update_group = mock.Mock()
+        _build_room_memory_text = mock.Mock(return_value='')
+        _trigger_llm_b = mock.Mock()
+        insert_goal = sg_mod.SceneGraph.insert_goal
+
+    bedroom.group_nodes[0].corr_score = 0
+    bedroom.group_nodes[0].center = [10, 20]
+
+    FakeSG.insert_goal(FakeSG)
+
+    # kitchen and bathroom were not chosen, but they were 'unvisited' — LLM B must NOT fire
+    FakeSG._trigger_llm_b.assert_not_called()
+    assert kitchen.status == 'unvisited'
+    assert bathroom.status == 'unvisited'
+    assert bedroom.status == 'active'
