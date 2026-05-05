@@ -764,7 +764,20 @@ Object pair(s):
         sorted_group_nodes = sorted(predict_room_node.group_nodes)
         self.mid_term_goal = sorted_group_nodes[-1].center
         return self.mid_term_goal
-    
+
+    def _build_room_memory_text(self):
+        lines = []
+        for room_node in self.room_nodes:
+            if room_node.memory:
+                last = room_node.memory[-1]
+                lines.append(
+                    f"{room_node.caption}: visited {len(room_node.memory)}x, "
+                    f"coverage={last.get('coverage','?')}, "
+                    f"priority={last.get('priority','?')}, "
+                    f"note={last.get('note','')}"
+                )
+        return '\n'.join(lines)
+
     def update_scenegraph(self):
         print(f'Navigate Step: {self.navigate_steps}', end='\r')
         self.segment2d()

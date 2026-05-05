@@ -77,3 +77,34 @@ def test_scenegraph_has_global_memory():
     assert 'prompt_llm_b' in init_src, "__init__ must assign self.prompt_llm_b"
     assert '{goal}' in init_src, "prompt_llm_b must contain {goal} placeholder"
     assert '{objects}' in init_src, "prompt_llm_b must contain {objects} placeholder"
+
+
+def test_build_room_memory_text_empty():
+    """Returns empty string when no room has memory."""
+    sg_mod = importlib.import_module('scenegraph')
+    RoomNode = sg_mod.RoomNode
+
+    class FakeSG:
+        room_nodes = [RoomNode('bedroom'), RoomNode('kitchen')]
+        _build_room_memory_text = sg_mod.SceneGraph._build_room_memory_text
+
+    result = FakeSG._build_room_memory_text(FakeSG)
+    assert result == ''
+
+
+def test_build_room_memory_text_with_record():
+    """Returns formatted line for each room that has memory."""
+    sg_mod = importlib.import_module('scenegraph')
+    RoomNode = sg_mod.RoomNode
+
+    bedroom = RoomNode('bedroom')
+    bedroom.memory = [{'coverage': 'partial', 'priority': 'medium', 'note': 'left corner unexplored'}]
+
+    class FakeSG:
+        room_nodes = [bedroom, RoomNode('kitchen')]
+        _build_room_memory_text = sg_mod.SceneGraph._build_room_memory_text
+
+    result = FakeSG._build_room_memory_text(FakeSG)
+    assert 'bedroom' in result
+    assert 'partial' in result
+    assert 'kitchen' not in result   # kitchen has no memory
