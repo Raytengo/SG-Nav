@@ -30,3 +30,43 @@ def test_room_node_has_memory_and_status():
     assert node.memory == []
     assert hasattr(node, 'status')
     assert node.status == 'unvisited'
+
+
+def make_scenegraph():
+    """Return a SceneGraph with all heavy methods neutered."""
+    import unittest.mock as mock
+    sg_mod = importlib.import_module('scenegraph')
+    SceneGraph = sg_mod.SceneGraph
+    with mock.patch.object(SceneGraph, 'get_sam_mask_generator', return_value=None), \
+         mock.patch.object(SceneGraph, 'set_cfg'), \
+         mock.patch.object(SceneGraph, 'set_agent'), \
+         mock.patch.object(SceneGraph, 'init_room_nodes'):
+        g = SceneGraph.__new__(SceneGraph)
+        g.rooms = ['bedroom', 'kitchen']
+        g.room_nodes = [RoomNode('bedroom'), RoomNode('kitchen')]
+        g.llm_name = 'test'
+        # call only the portion we care about
+        g.global_memory = None
+        g._llm_b_thread = None
+    return g
+
+
+def test_scenegraph_has_global_memory():
+    # Re-import after code change
+    importlib.invalidate_caches()
+    sg_mod = importlib.import_module('scenegraph')
+    SceneGraph = sg_mod.SceneGraph
+    import unittest.mock as mock
+    with mock.patch.object(SceneGraph, 'get_sam_mask_generator', return_value=None), \
+         mock.patch.object(SceneGraph, 'set_cfg'), \
+         mock.patch.object(SceneGraph, 'set_agent'), \
+         mock.patch.object(SceneGraph, 'init_room_nodes'):
+        g = object.__new__(SceneGraph)
+        g.rooms = []
+        g.llm_name = 'test'
+        g.vlm_name = 'test'
+        g.global_memory = {'other_floors': False, 'staircase_pos': None}
+        g._llm_b_thread = None
+
+    assert g.global_memory == {'other_floors': False, 'staircase_pos': None}
+    assert g._llm_b_thread is None

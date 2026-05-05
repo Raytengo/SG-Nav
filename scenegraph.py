@@ -1,6 +1,7 @@
 import base64
 import math
 import os
+import threading
 from collections import Counter
 from io import BytesIO
 from pathlib import Path, PosixPath
@@ -162,6 +163,21 @@ class SceneGraph():
         self.is_navigation = is_navigation
         self.llm_name = 'llama3.2-vision'
         self.vlm_name = 'llama3.2-vision'
+        self.global_memory = {'other_floors': False, 'staircase_pos': None}
+        self._llm_b_thread = None
+        self.prompt_llm_b = (
+            "You are a navigation observer. Write a structured exploration record.\n"
+            "Goal object: {goal}\n"
+            "Room: {room}\n"
+            "Objects found in room: {objects}\n"
+            "Previous records for this room: {prev}\n\n"
+            "Output exactly these lines (no extra text):\n"
+            "coverage: <full|partial|minimal>\n"
+            "priority: <high|medium|low>\n"
+            "confidence: <high|medium|low>\n"
+            "note: <one sentence>\n"
+            "other_floors_detected: <yes|no>"
+        )
         self.seg_xyxy = None
         self.seg_caption = None
         
