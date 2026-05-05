@@ -779,8 +779,8 @@ Object pair(s):
                 )
         return '\n'.join(lines)
 
-    def _run_llm_b(self, room_node):
-        objects_text = ', '.join(n.caption for n in room_node.nodes) or 'none'
+    def _run_llm_b(self, room_node, nodes_snapshot):
+        objects_text = ', '.join(n.caption for n in nodes_snapshot) or 'none'
         prev_text = str(room_node.memory[-1]) if room_node.memory else 'none'
         prompt = self.prompt_llm_b.format(
             goal=self.obj_goal_sg,
@@ -799,7 +799,9 @@ Object pair(s):
             self.global_memory['other_floors'] = True
 
     def _trigger_llm_b(self, room_node):
-        t = threading.Thread(target=self._run_llm_b, args=(room_node,), daemon=True)
+        # Snapshot nodes on the main thread to avoid concurrent mutation in the daemon thread
+        nodes_snapshot = list(room_node.nodes)
+        t = threading.Thread(target=self._run_llm_b, args=(room_node, nodes_snapshot), daemon=True)
         t.start()
         self._llm_b_thread = t
 

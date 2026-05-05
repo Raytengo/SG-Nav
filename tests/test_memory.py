@@ -193,7 +193,7 @@ def test_run_llm_b_appends_record():
         get_llm_response = mock.Mock(return_value=llm_response)
         _run_llm_b = sg_mod.SceneGraph._run_llm_b
 
-    FakeSG._run_llm_b(FakeSG, kitchen)
+    FakeSG._run_llm_b(FakeSG, kitchen, [])
     assert len(kitchen.memory) == 1
     record = kitchen.memory[0]
     assert record['coverage'] == 'partial'
@@ -230,5 +230,5 @@ def test_run_llm_b_updates_global_memory_on_staircase():
         get_llm_response = mock.Mock(return_value=llm_response)
         _run_llm_b = sg_mod.SceneGraph._run_llm_b
 
-    FakeSG._run_llm_b(FakeSG, hallway)
+    FakeSG._run_llm_b(FakeSG, hallway, [])
     assert FakeSG.global_memory['other_floors'] is True
