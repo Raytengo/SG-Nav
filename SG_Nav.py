@@ -1,6 +1,7 @@
 import argparse
 import copy
 import math
+import time
 import os
 from matplotlib import colors
 import cv2
@@ -79,6 +80,9 @@ class SG_Nav_Agent():
         self.rooms_captions = rooms_captions
         self.split = (self.args.split_l >= 0)
         self.metrics = {'distance_to_goal': 0., 'spl': 0., 'softspl': 0.}
+        self.step_timeout_sec = 120.0
+        self._last_step_index = -1
+        self._last_step_time = time.perf_counter()
 
         ### ------ init glip model ------ ###
         config_file = "GLIP/configs/pretrain/glip_Swin_L.yaml" 
@@ -130,10 +134,13 @@ class SG_Nav_Agent():
         
         self.scenegraph = SceneGraph(map_resolution=self.map_resolution, map_size_cm=self.map_size_cm, map_size=self.map_size, camera_matrix=self.camera_matrix, agent=self)
 
-        self.experiment_name = 'experiment_0'
+        self.experiment_name = getattr(self.args, 'experiment_name', 'experiment_0')
 
         if self.split:
-            self.experiment_name = self.experiment_name + f'/[{self.args.split_l}:{self.args.split_r}]'
+            self.experiment_name = os.path.join(
+                self.experiment_name,
+                f'[{self.args.split_l}:{self.args.split_r}]',
+            )
 
         self.visualization_dir = f'data/visualization/{self.experiment_name}/'
 
@@ -216,6 +223,10 @@ class SG_Nav_Agent():
         self.current_stuck_steps = 0
         self.total_stuck_steps = 0
         self.explanation = ''
+        self.explanation_room = ''
+        self.explanation_review = ''
+        self.explanation_room = ''
+        self.explanation_review = ''
         self.text_node = ''
         self.text_edge = ''
 
@@ -354,6 +365,16 @@ class SG_Nav_Agent():
             return
                         
     def act(self, observations):
+        now = time.perf_counter()
+        if self.navigate_steps > 0 and self.navigate_steps == self._last_step_index:
+            if now - self._last_step_time >= self.step_timeout_sec:
+                print(f"[Timeout] step={self.navigate_steps} exceeded {self.step_timeout_sec:.0f}s; aborting episode")
+                if self.args.visualize and self.visualize_image_list:
+                    self.save_video()
+                return {"action": 0}
+        else:
+            self._last_step_index = self.navigate_steps
+            self._last_step_time = now
         if self.total_steps >= 500:
             return {"action": 0}
         
@@ -375,10 +396,26 @@ class SG_Nav_Agent():
         self.scenegraph.set_observations(observations)
         self.scenegraph.set_full_map(self.full_map)
         self.scenegraph.set_full_pose(self.full_pose)
+        t_step_start = time.perf_counter()
         self.scenegraph.update_scenegraph()
-        
+        t_sg = time.perf_counter()
+        self.text_node = ', '.join(
+            node.caption for node in self.scenegraph.nodes if node.caption
+        )
+        seen_edges = set()
+        edge_text_list = []
+        for node in self.scenegraph.nodes:
+            for edge in node.edges:
+                if edge in seen_edges or edge.relation is None:
+                    continue
+                seen_edges.add(edge)
+                edge_text_list.append(
+                    f"({edge.node1.caption}->{edge.relation}->{edge.node2.caption})"
+                )
+        self.text_edge = ' '.join(edge_text_list)
         self.update_map(observations)
         self.update_free_map(observations)
+        t_map = time.perf_counter()
         
         if self.total_steps == 1:
             self.sem_map_module.set_view_angles(30)
@@ -420,6 +457,10 @@ class SG_Nav_Agent():
         self.last_gps = observations["gps"]
         
         self.scenegraph.perception()
+        t_perc = time.perf_counter()
+
+        self.explanation_room = self.scenegraph.last_room_choice_text
+        self.explanation_review = self.scenegraph.last_llm_b_text
           
         self.history_pose.append(self.full_pose.cpu().detach().clone())
         input_pose = np.zeros(7)
@@ -453,7 +494,9 @@ class SG_Nav_Agent():
                 self.goal_map = self.goal_map[::-1]
         
         # local policy
+        t_plan_start = time.perf_counter()
         stg_y, stg_x, replan, number_action = self._plan(traversible, self.goal_map, self.full_pose, cur_start, cur_start_o, self.found_goal)
+        t_plan_end = time.perf_counter()
         if self.found_possible_goal and number_action == 0:
             self.found_possible_goal = False
         
@@ -477,7 +520,9 @@ class SG_Nav_Agent():
                 self.fronter_this_ex += 1
                 self.goal_map[self.goal_loc[0], self.goal_loc[1]] = 1
                 self.goal_map = self.goal_map[::-1]
+            t_plan_start = time.perf_counter()
             stg_y, stg_x, replan, number_action = self._plan(traversible, self.goal_map, self.full_pose, cur_start, cur_start_o, self.found_goal)
+            t_plan_end = time.perf_counter()
         
         self.loop_time = 0
         while (not self.found_goal and number_action == 0) or self.not_move_steps >= 7:
@@ -491,7 +536,9 @@ class SG_Nav_Agent():
             self.not_move_steps = 0
             self.goal_map = self.set_random_goal()
             self.using_random_goal = True
+            t_plan_start = time.perf_counter()
             stg_y, stg_x, replan, number_action = self._plan(traversible, self.goal_map, self.full_pose, cur_start, cur_start_o, self.found_goal)
+            t_plan_end = time.perf_counter()
         
         if self.args.visualize:
             self.visualize(traversible, observations, number_action)
@@ -501,6 +548,15 @@ class SG_Nav_Agent():
         self.last_loc = copy.deepcopy(self.full_pose)
         self.prev_action = number_action
         self.navigate_steps += 1
+        t_step_end = time.perf_counter()
+        print(
+            f"\n[Step] {self.navigate_steps} "
+            f"scenegraph={t_sg - t_step_start:.2f}s "
+            f"map={t_map - t_sg:.2f}s "
+            f"perception={t_perc - t_map:.2f}s "
+            f"plan={t_plan_end - t_plan_start:.2f}s "
+            f"total={t_step_end - t_step_start:.2f}s"
+        )
         torch.cuda.empty_cache()
         
         return {"action": number_action}
@@ -768,7 +824,11 @@ class SG_Nav_Agent():
             except:
                 goal = self.set_random_goal(goal)
 
-        self.planner.set_multi_goal(goal, state) # time cosuming 
+        t_plan = time.perf_counter()
+        self.planner.set_multi_goal(goal, state) # time consuming
+        t_plan_end = time.perf_counter()
+        if t_plan_end - t_plan > 5.0:
+            print(f"[Planner] set_multi_goal took {t_plan_end - t_plan:.2f}s")
 
         decrease_stop_cond =0
         if self.dilation_deg >= 6:
@@ -825,15 +885,18 @@ class SG_Nav_Agent():
             visualize_image = add_rectangle(visualize_image, (340, 60), (520, 300), (128, 128, 128), thickness=1)
             visualize_image = add_rectangle(visualize_image, (540, 60), (790, 165), (128, 128, 128), thickness=1)
             visualize_image = add_rectangle(visualize_image, (540, 195), (790, 300), (128, 128, 128), thickness=1)
-            visualize_image = add_rectangle(visualize_image, (10, 350), (790, 400), (128, 128, 128), thickness=1)
+            visualize_image = add_rectangle(visualize_image, (10, 350), (390, 400), (128, 128, 128), thickness=1)
+            visualize_image = add_rectangle(visualize_image, (410, 350), (790, 400), (128, 128, 128), thickness=1)
             visualize_image = add_text(visualize_image, "Observation (Goal: {})".format(self.obj_goal), (70, 50), font_scale=0.5, thickness=1)
             visualize_image = add_text(visualize_image, "Occupancy Map", (370, 50), font_scale=0.5, thickness=1)
             visualize_image = add_text(visualize_image, "Scene Graph Nodes", (580, 50), font_scale=0.5, thickness=1)
             visualize_image = add_text(visualize_image, "Scene Graph Edges", (580, 185), font_scale=0.5, thickness=1)
-            visualize_image = add_text(visualize_image, "LLM Explanation", (330, 340), font_scale=0.5, thickness=1)
+            visualize_image = add_text(visualize_image, "LLM Room Choice", (110, 340), font_scale=0.5, thickness=1)
+            visualize_image = add_text(visualize_image, "LLM Review", (520, 340), font_scale=0.5, thickness=1)
             visualize_image = add_text_list(visualize_image, line_list(self.text_node, 40), (550, 80), font_scale=0.3, thickness=1)
             visualize_image = add_text_list(visualize_image, line_list(self.text_edge, 40), (550, 215), font_scale=0.3, thickness=1)
-            visualize_image = add_text_list(visualize_image, line_list(self.explanation, 150), (20, 370), font_scale=0.3, thickness=1)
+            visualize_image = add_text_list(visualize_image, line_list(self.explanation_room, 70), (20, 370), font_scale=0.3, thickness=1)
+            visualize_image = add_text_list(visualize_image, line_list(self.explanation_review, 70), (420, 370), font_scale=0.3, thickness=1)
             visualize_image = visualize_image[:, :, ::-1]
             self.visualize_image_list.append(visualize_image)
 

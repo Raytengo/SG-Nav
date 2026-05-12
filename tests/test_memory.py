@@ -184,8 +184,11 @@ def test_run_llm_b_appends_record():
     class FakeSG:
         obj_goal_sg = 'chair'
         global_memory = {'other_floors': False, 'staircase_pos': None}
+        llm_timeout_sec = 30.0
+        last_llm_b_text = ''
         prompt_llm_b = (
             "Goal object: {goal}\nRoom: {room}\nObjects found in room: {objects}\n"
+            "Why the agent left this room: {llm_a_reasoning}\n"
             "Previous records for this room: {prev}\n\n"
             "coverage: <full|partial|minimal>\npriority: <high|medium|low>\n"
             "confidence: <high|medium|low>\nnote: <one sentence>\nother_floors_detected: <yes|no>"
@@ -223,8 +226,11 @@ def test_run_llm_b_updates_global_memory_on_staircase():
     class FakeSG:
         obj_goal_sg = 'chair'
         global_memory = {'other_floors': False, 'staircase_pos': None}
+        llm_timeout_sec = 30.0
+        last_llm_b_text = ''
         prompt_llm_b = (
             "Goal object: {goal}\nRoom: {room}\nObjects found in room: {objects}\n"
+            "Why the agent left this room: {llm_a_reasoning}\n"
             "Previous records for this room: {prev}\n"
         )
         get_llm_response = mock.Mock(return_value=llm_response)
@@ -250,8 +256,8 @@ def test_insert_goal_sets_chosen_room_active():
         obj_goal_sg = 'chair'
         room_nodes = [bedroom, kitchen]
         global_memory = {'other_floors': False, 'staircase_pos': None}
-        prompt_room_predict = 'Which room for [{}] in [{}]. Only answer the room.'
-        get_llm_response = mock.Mock(return_value='bedroom')
+        prompt_room_predict = '{memory_section}Rooms: [{rooms}]. Goal: [{goal}].\nAnswer: <room name>'
+        get_llm_response = mock.Mock(return_value='Answer: bedroom')
         graph_corr = mock.Mock(return_value=0.8)
         update_group = mock.Mock()
         _build_room_memory_text = mock.Mock(return_value='')
@@ -284,8 +290,8 @@ def test_insert_goal_triggers_llm_b_on_active_to_abandoned():
         obj_goal_sg = 'chair'
         room_nodes = [bedroom, kitchen]
         global_memory = {'other_floors': False, 'staircase_pos': None}
-        prompt_room_predict = 'Which room for [{}] in [{}]. Only answer the room.'
-        get_llm_response = mock.Mock(return_value='kitchen')  # LLM picks kitchen
+        prompt_room_predict = '{memory_section}Rooms: [{rooms}]. Goal: [{goal}].\nAnswer: <room name>'
+        get_llm_response = mock.Mock(return_value='Answer: kitchen')  # LLM picks kitchen
         graph_corr = mock.Mock(return_value=0.5)
         update_group = mock.Mock()
         _build_room_memory_text = mock.Mock(return_value='')
@@ -298,7 +304,7 @@ def test_insert_goal_triggers_llm_b_on_active_to_abandoned():
     FakeSG.insert_goal(FakeSG)
 
     assert bedroom.status == 'abandoned'
-    FakeSG._trigger_llm_b.assert_called_once_with(bedroom)
+    FakeSG._trigger_llm_b.assert_called_once_with(bedroom, 'Answer: kitchen')
     assert kitchen.status == 'active'
 
 
@@ -330,8 +336,8 @@ def test_insert_goal_does_not_trigger_llm_b_for_unvisited_rooms():
         obj_goal_sg = 'chair'
         room_nodes = [bedroom, kitchen, bathroom]
         global_memory = {'other_floors': False, 'staircase_pos': None}
-        prompt_room_predict = 'Which room for [{}] in [{}]. Only answer the room.'
-        get_llm_response = mock.Mock(return_value='bedroom')
+        prompt_room_predict = '{memory_section}Rooms: [{rooms}]. Goal: [{goal}].\nAnswer: <room name>'
+        get_llm_response = mock.Mock(return_value='Answer: bedroom')
         graph_corr = mock.Mock(return_value=0.7)
         update_group = mock.Mock()
         _build_room_memory_text = mock.Mock(return_value='')
@@ -375,16 +381,20 @@ def test_run_llm_b_includes_node_captions_from_snapshot():
 
     captured_prompt = {}
 
-    def capture_prompt(prompt):
+    def capture_prompt(prompt, **kwargs):
         captured_prompt['text'] = prompt
         return llm_response
 
     class FakeSG:
         obj_goal_sg = 'chair'
         global_memory = {'other_floors': False, 'staircase_pos': None}
+        llm_timeout_sec = 30.0
+        last_llm_b_text = ''
         prompt_llm_b = (
             "Goal object: {goal}\nRoom: {room}\n"
-            "Objects found in room: {objects}\nPrevious records: {prev}\n"
+            "Objects found in room: {objects}\n"
+            "Why the agent left this room: {llm_a_reasoning}\n"
+            "Previous records: {prev}\n"
         )
         get_llm_response = capture_prompt
         _run_llm_b = sg_mod.SceneGraph._run_llm_b

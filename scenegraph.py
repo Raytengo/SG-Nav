@@ -1,11 +1,14 @@
 import base64
 import math
 import os
+import signal
 import threading
+import time
 from collections import Counter
 from io import BytesIO
 from pathlib import Path, PosixPath
 import cv2
+import httpx
 import numpy as np
 import omegaconf
 import supervision as sv
@@ -135,6 +138,22 @@ class Edge():
         return text
 
 
+class VLMTimeoutError(TimeoutError):
+    pass
+
+
+class VLMRequestError(RuntimeError):
+    pass
+
+
+class LLMTimeoutError(TimeoutError):
+    pass
+
+
+class LLMRequestError(RuntimeError):
+    pass
+
+
 class SceneGraph():
     def __init__(self, map_resolution, map_size_cm, map_size, camera_matrix, is_navigation=True, agent=None) -> None:
         self.map_resolution = map_resolution
@@ -160,11 +179,20 @@ class SceneGraph():
         self.group_nodes = []
         self.init_room_nodes()
         self.reason_visualization = ''
+        self.last_room_choice_text = ''
+        self.last_llm_b_text = ''
         self.is_navigation = is_navigation
         self.llm_name = 'llama3.2-vision'
         self.vlm_name = 'llama3.2-vision'
         self.global_memory = {'other_floors': False, 'staircase_pos': None}
         self._llm_b_thread = None
+        self._last_scenegraph_print_step = -1
+        self.llm_slow_threshold_sec = 2.0
+        self.llm_timeout_sec = 30.0
+        self.include_history_in_prompts = True
+        self.vlm_timeout_sec = 30.0
+        self.edge_update_budget_sec = 60.0
+        self.step_timeout_guard_sec = 1.0
         self.prompt_llm_b = (
             "You are a navigation observer. Write a structured exploration record.\n"
             "Goal object: {goal}\n"
@@ -185,6 +213,10 @@ class SceneGraph():
         self.groundingdino_checkpoint = 'data/models/groundingdino_swint_ogc.pth'
         self.sam_version = 'vit_h'
         self.sam_checkpoint = 'data/models/sam_vit_h_4b8939.pth'
+        self.bert_base_uncased_path = os.environ.get(
+            'BERT_BASE_UNCASED_PATH',
+            '/home/yzhang822/.cache/huggingface/hub/models--bert-base-uncased/snapshots/86b5e0934494bd15c9632b12f734a8a67f723594'
+        )
         self.segment2d_results = []
         self.max_detections_per_object = 10
         self.threshold_list = {'bathtub': 2, 'bed': 7, 'cabinet': 3, 'chair': 5, 'chest_of_drawers': 5, 'clothes': 9, 'counter': 4, 'cushion': 7, 'fireplace': 4, 'gym_equipment': 7, 'picture': 9, 'plant': 3, 'seating': 2, 'shower': 2, 'sink': 3, 'sofa': 9, 'stool': 5, 'table': 8, 'toilet': 3, 'towel': 4, 'tv_monitor': 2, 'treadmill. fitness equipment.': 0}
@@ -215,7 +247,12 @@ Object pair(s):
         '''
         self.prompt_relation = 'What is the spatial relationship between the {} and the {} in the image? You can only answer a word or phrase that describes a spatial relationship.'
         self.prompt_discriminate_relation = 'In the image, do {} and {} satisfy the relationship of {}? Only answer "yes" or "no".'
-        self.prompt_room_predict = 'Which room is the most likely to have the [{}] in: [{}]. Only answer the room.'
+        self.prompt_room_predict = (
+            "Goal: find [{}].\n"
+            "Rooms with observed objects: [{}].\n"
+            "{memory_hint}"
+            "Which room should the agent explore next? Only answer the room name."
+        )
         self.prompt_graph_corr_0 = 'What is the probability of A and B appearing together. [A:{}], [B:{}]. Even if you do not have enough information, you have to answer with a value from 0 to 1 anyway. Answer only the value of probability and do not answer any other text.'
         self.prompt_graph_corr_1 = 'What else do you need to know to determine the probability of A and B appearing together? [A:{}], [B:{}]. Please output a short question (output only one sentence with no additional text).'
         self.prompt_graph_corr_2 = 'Here is the objects and relationships near A: [{}] You answer the following question with a short sentence based on this information. Question: {}'
@@ -240,8 +277,17 @@ Object pair(s):
         self.edge_text = ''
         self.edge_list = []
         self.reason_visualization = ''
+        self.last_room_choice_text = ''
+        self.last_llm_b_text = ''
         self.global_memory = {'other_floors': False, 'staircase_pos': None}
         self._llm_b_thread = None
+        self._last_scenegraph_print_step = -1
+        self.llm_slow_threshold_sec = 2.0
+        self.llm_timeout_sec = 30.0
+        self.include_history_in_prompts = True
+        self.vlm_timeout_sec = 30.0
+        self.edge_update_budget_sec = 60.0
+        self.step_timeout_guard_sec = 1.0
 
     def set_cfg(self):
         cfg = {'dataset_config': PosixPath('tools/replica.yaml'), 'scene_id': 'room0', 'start': 0, 'end': -1, 'stride': 5, 'image_height': 680, 'image_width': 1200, 'gsa_variant': 'none', 'detection_folder_name': 'gsa_detections_${gsa_variant}', 'det_vis_folder_name': 'gsa_vis_${gsa_variant}', 'color_file_name': 'gsa_classes_${gsa_variant}', 'device': 'cuda', 'use_iou': True, 'spatial_sim_type': 'overlap', 'phys_bias': 0.0, 'match_method': 'sim_sum', 'semantic_threshold': 0.5, 'physical_threshold': 0.5, 'sim_threshold': 1.2, 'use_contain_number': False, 'contain_area_thresh': 0.95, 'contain_mismatch_penalty': 0.5, 'mask_area_threshold': 25, 'mask_conf_threshold': 0.95, 'max_bbox_area_ratio': 0.5, 'skip_bg': True, 'min_points_threshold': 16, 'downsample_voxel_size': 0.025, 'dbscan_remove_noise': True, 'dbscan_eps': 0.1, 'dbscan_min_points': 10, 'obj_min_points': 0, 'obj_min_detections': 3, 'merge_overlap_thresh': 0.7, 'merge_visual_sim_thresh': 0.8, 'merge_text_sim_thresh': 0.8, 'denoise_interval': 20, 'filter_interval': -1, 'merge_interval': 20, 'save_pcd': True, 'save_suffix': 'overlap_maskconf0.95_simsum1.2_dbscan.1_merge20_masksub', 'vis_render': False, 'debug_render': False, 'class_agnostic': True, 'save_objects_all_frames': True, 'render_camera_path': 'replica_room0.json', 'max_num_points': 512}
@@ -332,7 +378,12 @@ Object pair(s):
             # model = YOLO(args.model_path)
             # return model
         elif variant == "groundedsam":
-            model = load_model(self.groundingdino_config_file, self.groundingdino_checkpoint, None, device=device)
+            model = load_model(
+                self.groundingdino_config_file,
+                self.groundingdino_checkpoint,
+                self.bert_base_uncased_path,
+                device=device
+            )
             predictor = SamPredictor(sam_model_registry[self.sam_version](checkpoint=self.sam_checkpoint).to(device))
             return model, predictor
         else:
@@ -692,11 +743,48 @@ Object pair(s):
             node_new_edges = set(filter(lambda edge: edge.relation is None, node.edges))
             new_edges = new_edges | node_new_edges
         new_edges = list(new_edges)
-        for new_edge in new_edges:
+        print(f"[Edge] pending relations: {len(new_edges)}")
+        edge_loop_start = time.perf_counter()
+        for idx_edge, new_edge in enumerate(new_edges, start=1):
+            remaining_step_budget = self.get_step_remaining_budget_sec()
+            remaining_edge_budget = self.edge_update_budget_sec - (time.perf_counter() - edge_loop_start)
+            timeout_budget = min(remaining_edge_budget, remaining_step_budget)
+            if timeout_budget <= 0:
+                print(
+                    f"[Edge] step={self.navigate_steps} skip remaining relations: "
+                    f"budget exhausted"
+                )
+                return
             image = self.get_joint_image(new_edge.node1, new_edge.node2)
             if image is not None:
                 prompt = self.prompt_relation.format(new_edge.node1.caption, new_edge.node2.caption)
-                response = self.get_vlm_response(prompt=prompt, image=image)
+                t_edge = time.perf_counter()
+                try:
+                    response = self.get_vlm_response(
+                        prompt=prompt,
+                        image=image,
+                        timeout_sec=timeout_budget,
+                    )
+                except VLMTimeoutError:
+                    print(
+                        f"[Edge] {idx_edge}/{len(new_edges)} "
+                        f"{new_edge.node1.caption} <-> {new_edge.node2.caption} "
+                        f"skipped: timeout>{timeout_budget:.2f}s"
+                    )
+                    continue
+                except VLMRequestError as exc:
+                    print(
+                        f"[Edge] {idx_edge}/{len(new_edges)} "
+                        f"{new_edge.node1.caption} <-> {new_edge.node2.caption} "
+                        f"skipped: vlm request failed ({exc})"
+                    )
+                    continue
+                t_edge_end = time.perf_counter()
+                print(
+                    f"[Edge] {idx_edge}/{len(new_edges)} "
+                    f"{new_edge.node1.caption} <-> {new_edge.node2.caption} "
+                    f"vlm_time={t_edge_end - t_edge:.2f}s"
+                )
                 response = response.replace('.', '').lower()
                 new_edge.set_relation(response)
         new_edges = set()
@@ -706,13 +794,43 @@ Object pair(s):
         new_edges = list(new_edges)
         # get all relation proposals
         if len(new_edges) > 0:
+            remaining_step_budget = self.get_step_remaining_budget_sec()
+            remaining_edge_budget = self.edge_update_budget_sec - (time.perf_counter() - edge_loop_start)
+            if min(remaining_edge_budget, remaining_step_budget) <= 0:
+                print(
+                    f"[Edge] step={self.navigate_steps} skip proposal/discrimination: "
+                    f"budget exhausted"
+                )
+                return
             node_pairs = []
             for new_edge in new_edges:
                 node_pairs.append(new_edge.node1.caption)
                 node_pairs.append(new_edge.node2.caption)
             prompt = self.prompt_edge_proposal + '\n({}, {})' * len(new_edges)
             prompt = prompt.format(*node_pairs)
-            relations = self.get_llm_response(prompt=prompt)
+            proposal_timeout_sec = min(
+                self.llm_timeout_sec,
+                remaining_edge_budget,
+                remaining_step_budget,
+            )
+            try:
+                relations = self.get_llm_response(
+                    prompt=prompt,
+                    timeout_sec=proposal_timeout_sec,
+                    log_label=f"edge_proposal pairs={len(new_edges)}",
+                )
+            except LLMTimeoutError:
+                print(
+                    f"[Edge] step={self.navigate_steps} skip proposal/discrimination: "
+                    f"llm timeout>{proposal_timeout_sec:.2f}s"
+                )
+                return
+            except LLMRequestError as exc:
+                print(
+                    f"[Edge] step={self.navigate_steps} skip proposal/discrimination: "
+                    f"llm request failed ({exc})"
+                )
+                return
             relations = relations.split('\n')
             if len(relations) == len(new_edges):
                 for i, relation in enumerate(relations):
@@ -751,13 +869,25 @@ Object pair(s):
         if room_node_text == '':
             return None
 
-        prompt = self.prompt_room_predict.format(goal, room_node_text)
+        memory_hint = ''
         memory_text = self._build_room_memory_text()
-        if memory_text:
+        if getattr(self, 'include_history_in_prompts', True) and memory_text:
             global_line = "other floors detected: yes" if self.global_memory['other_floors'] else "other floors detected: no"
-            prompt += f"\n\n{global_line}\nPast exploration:\n{memory_text}"
+            memory_hint = f"\n{global_line}\nPast exploration:\n{memory_text}\n"
+        prompt = self.prompt_room_predict.format(goal, room_node_text, memory_hint=memory_hint)
 
-        response = self.get_llm_response(prompt=prompt)
+        try:
+            response = self.get_llm_response(
+                prompt=prompt,
+                log_label=f"room_choice goal={goal}",
+            )
+        except LLMTimeoutError:
+            print(f"[LLM] room_choice skipped: timeout>{self.llm_timeout_sec:.2f}s")
+            return None
+        except LLMRequestError as exc:
+            print(f"[LLM] room_choice skipped: request failed ({exc})")
+            return None
+        self.last_room_choice_text = response.strip()
         response = response.lower()
         predict_room_node = None
         for room_node in self.room_nodes:
@@ -804,14 +934,33 @@ Object pair(s):
 
     def _run_llm_b(self, room_node, nodes_snapshot):
         objects_text = ', '.join(n.caption for n in nodes_snapshot) or 'none'
-        prev_text = str(room_node.memory[-1]) if room_node.memory else 'none'
+        include_history_in_prompts = getattr(self, 'include_history_in_prompts', True)
+        prev_text = str(room_node.memory[-1]) if include_history_in_prompts and room_node.memory else 'none'
         prompt = self.prompt_llm_b.format(
             goal=self.obj_goal_sg,
             room=room_node.caption,
             objects=objects_text,
             prev=prev_text,
         )
-        response = self.get_llm_response(prompt)
+        try:
+            response = self.get_llm_response(
+                prompt,
+                timeout_sec=self.llm_timeout_sec,
+                log_label=f"review room={room_node.caption}",
+            )
+        except LLMTimeoutError:
+            print(
+                f"[LLM] review room={room_node.caption} skipped: "
+                f"timeout>{self.llm_timeout_sec:.2f}s"
+            )
+            return
+        except LLMRequestError as exc:
+            print(
+                f"[LLM] review room={room_node.caption} skipped: "
+                f"request failed ({exc})"
+            )
+            return
+        self.last_llm_b_text = response.strip()
         record = {'visit': len(room_node.memory) + 1}
         for line in response.strip().split('\n'):
             if ':' in line:
@@ -829,37 +978,140 @@ Object pair(s):
         self._llm_b_thread = t
 
     def update_scenegraph(self):
-        print(f'Navigate Step: {self.navigate_steps}', end='\r')
+        if self.navigate_steps != self._last_scenegraph_print_step:
+            print(f"[SceneGraph] step={self.navigate_steps}")
+            self._last_scenegraph_print_step = self.navigate_steps
+        t_start = time.perf_counter()
         self.segment2d()
+        t_seg = time.perf_counter()
         if len(self.segment2d_results) > 0:
             self.mapping3d()
+            t_map = time.perf_counter()
             self.get_caption()
+            t_cap = time.perf_counter()
             self.update_node()
+            t_node = time.perf_counter()
             self.update_edge()
+            t_edge = time.perf_counter()
+            if t_edge - t_node > 5.0:
+                print(
+                    f"[SceneGraph] step={self.navigate_steps} "
+                    f"segment2d={t_seg - t_start:.2f}s "
+                    f"mapping3d={t_map - t_seg:.2f}s "
+                    f"caption={t_cap - t_map:.2f}s "
+                    f"update_node={t_node - t_cap:.2f}s "
+                    f"update_edge={t_edge - t_node:.2f}s"
+                )
     
-    def get_llm_response(self, prompt):
-        response = ollama.chat(
+    def format_exception_message(self, exc):
+        message = str(exc).strip()
+        if message:
+            return message
+        return exc.__class__.__name__
+
+    def get_llm_response(self, prompt, timeout_sec=None, log_label=None):
+        if timeout_sec is None:
+            timeout_sec = self.llm_timeout_sec
+            if threading.current_thread() is threading.main_thread():
+                timeout_sec = min(timeout_sec, self.get_step_remaining_budget_sec())
+        if log_label is not None:
+            print(f"[LLM] start {log_label} timeout<={timeout_sec:.2f}s")
+        t_start = time.perf_counter()
+        response = self.chat_with_timeout(
             model=self.llm_name,
             messages=[{
                 'role': 'user',
                 'content': prompt,
-            }]
+            }],
+            timeout_sec=timeout_sec,
+            timeout_error_cls=LLMTimeoutError,
+            request_error_cls=LLMRequestError,
         )
+        t_end = time.perf_counter()
+        if log_label is not None:
+            print(f"[LLM] done {log_label} took {t_end - t_start:.2f}s")
+        elif t_end - t_start >= self.llm_slow_threshold_sec:
+            print(f"[LLM] took {t_end - t_start:.2f}s")
         return response.message.content
+
+    def _raise_timeout(self, signum, frame):
+        timeout_error_cls = getattr(self, '_chat_timeout_error_cls', VLMTimeoutError)
+        raise timeout_error_cls()
+
+    def get_step_remaining_budget_sec(self):
+        if self.agent is None:
+            return math.inf
+        step_started_at = getattr(self.agent, '_last_step_time', None)
+        step_timeout_sec = getattr(self.agent, 'step_timeout_sec', None)
+        if step_started_at is None or step_timeout_sec is None:
+            return math.inf
+        remaining = step_timeout_sec - (time.perf_counter() - step_started_at) - self.step_timeout_guard_sec
+        return max(0.0, remaining)
+
+    def chat_with_timeout(
+        self,
+        *,
+        model,
+        messages,
+        timeout_sec=None,
+        timeout_error_cls=VLMTimeoutError,
+        request_error_cls=VLMRequestError,
+    ):
+        def _chat_request(client=None):
+            active_client = client or ollama
+            try:
+                return active_client.chat(model=model, messages=messages)
+            except httpx.TimeoutException as exc:
+                raise timeout_error_cls() from exc
+            except (ollama.ResponseError, ollama.RequestError, httpx.HTTPError) as exc:
+                raise request_error_cls(self.format_exception_message(exc)) from exc
+
+        if timeout_sec is None or math.isinf(timeout_sec):
+            return _chat_request()
+        timeout_sec = max(0.0, timeout_sec)
+        if timeout_sec == 0.0:
+            raise timeout_error_cls()
+        client = ollama.Client(timeout=timeout_sec)
+        if threading.current_thread() is not threading.main_thread():
+            return _chat_request(client)
+
+        previous_handler = signal.getsignal(signal.SIGALRM)
+        previous_timeout_error_cls = getattr(self, '_chat_timeout_error_cls', VLMTimeoutError)
+        self._chat_timeout_error_cls = timeout_error_cls
+        signal.signal(signal.SIGALRM, self._raise_timeout)
+        signal.setitimer(signal.ITIMER_REAL, timeout_sec)
+        try:
+            return _chat_request(client)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+            self._chat_timeout_error_cls = previous_timeout_error_cls
     
-    def get_vlm_response(self, prompt, image):
+    def get_vlm_response(self, prompt, image, timeout_sec=None):
         buffered = BytesIO()
         image.save(buffered, format='PNG')
         image_bytes = base64.b64encode(buffered.getvalue())
         image_str = str(image_bytes, 'utf-8')
-        response = ollama.chat(
+        step_budget = self.get_step_remaining_budget_sec()
+        if timeout_sec is None:
+            timeout_sec = step_budget
+        else:
+            timeout_sec = min(timeout_sec, step_budget)
+        t_start = time.perf_counter()
+        response = self.chat_with_timeout(
             model=self.vlm_name,
             messages=[{
                 'role': 'user',
                 'content': prompt,
                 'images': [image_str]
-            }]
+            }],
+            timeout_sec=timeout_sec,
+            timeout_error_cls=VLMTimeoutError,
+            request_error_cls=VLMRequestError,
         )
+        t_end = time.perf_counter()
+        if t_end - t_start >= self.llm_slow_threshold_sec:
+            print(f"[VLM] took {t_end - t_start:.2f}s")
         return response.message.content
         
     def find_modes(self, lst):  
@@ -928,7 +1180,27 @@ Object pair(s):
     def discriminate_relation(self, edge):
         image = self.get_joint_image(edge.node1, edge.node2)
         if image is not None:
-            response = self.get_vlm_response(self.prompt_discriminate_relation.format(edge.node1.caption, edge.node2.caption, edge.relation), image)
+            try:
+                response = self.get_vlm_response(
+                    self.prompt_discriminate_relation.format(
+                        edge.node1.caption,
+                        edge.node2.caption,
+                        edge.relation,
+                    ),
+                    image,
+                )
+            except VLMTimeoutError:
+                print(
+                    f"[Edge] discriminate {edge.node1.caption} <-> {edge.node2.caption} "
+                    f"skipped: timeout"
+                )
+                return False
+            except VLMRequestError as exc:
+                print(
+                    f"[Edge] discriminate {edge.node1.caption} <-> {edge.node2.caption} "
+                    f"skipped: vlm request failed ({exc})"
+                )
+                return False
             if 'yes' in response.lower():
                 return True
             else:
@@ -961,13 +1233,21 @@ Object pair(s):
                 self.agent.update_room_map(self.observations, room_detection_result)
 
     def graph_corr(self, goal, graph):
-        prompt = self.prompt_graph_corr_0.format(graph.center_node.caption, goal)
-        response_0 = self.get_llm_response(prompt=prompt)
-        prompt = self.prompt_graph_corr_1.format(graph.center_node.caption, goal)
-        response_1 = self.get_llm_response(prompt=prompt)
-        prompt = self.prompt_graph_corr_2.format(graph.caption, response_1)
-        response_2 = self.get_llm_response(prompt=prompt)
-        prompt = self.prompt_graph_corr_3.format(response_0, response_1 + response_2, graph.center_node.caption, goal)
-        response_3 = self.get_llm_response(prompt=prompt)
+        log_prefix = f"graph_corr center={graph.center_node.caption} goal={goal}"
+        try:
+            prompt = self.prompt_graph_corr_0.format(graph.center_node.caption, goal)
+            response_0 = self.get_llm_response(prompt=prompt, log_label=f"{log_prefix} stage=0")
+            prompt = self.prompt_graph_corr_1.format(graph.center_node.caption, goal)
+            response_1 = self.get_llm_response(prompt=prompt, log_label=f"{log_prefix} stage=1")
+            prompt = self.prompt_graph_corr_2.format(graph.caption, response_1)
+            response_2 = self.get_llm_response(prompt=prompt, log_label=f"{log_prefix} stage=2")
+            prompt = self.prompt_graph_corr_3.format(response_0, response_1 + response_2, graph.center_node.caption, goal)
+            response_3 = self.get_llm_response(prompt=prompt, log_label=f"{log_prefix} stage=3")
+        except LLMTimeoutError:
+            print(f"[LLM] {log_prefix} skipped: timeout>{self.llm_timeout_sec:.2f}s")
+            return 0.0
+        except LLMRequestError as exc:
+            print(f"[LLM] {log_prefix} skipped: request failed ({exc})")
+            return 0.0
         corr_score = text2value(response_3)
         return corr_score
