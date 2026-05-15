@@ -1,84 +1,106 @@
-# SG-Nav: Online 3D Scene Graph Prompting for LLM-based Zero-shot Object Navigation
-### [Paper](https://arxiv.org/abs/2410.08189) | [Project Page](https://bagh2178.github.io/SG-Nav/) | [Video](https://cloud.tsinghua.edu.cn/f/ae050a060d624be4bc5d/?dl=1) | [中文解读](https://zhuanlan.zhihu.com/p/909651478)
+# From 2D Priors to 3D Cognition with Memory: Reproducing and Enhancing Zero-Shot Object Navigation
 
-> SG-Nav: Online 3D Scene Graph Prompting for LLM-based Zero-shot Object Navigation  
-> [Hang Yin](https://bagh2178.github.io/)*, [Xiuwei Xu](https://xuxw98.github.io/)\* $^\dagger$, [Zhenyu Wu](https://gary3410.github.io/), [Jie Zhou](https://scholar.google.com/citations?user=6a79aPwAAAAJ&hl=en&authuser=1), [Jiwen Lu](http://ivg.au.tsinghua.edu.cn/Jiwen_Lu/)$^\ddagger$  
+**AIAA 3201 Introduction to Computer Vision, Spring 2026**  
+Yenchi Tseng · Yongqi Zhang
 
-\* Equal contribution $\dagger$ Project leader $\ddagger$ Corresponding author
+---
 
+We follow a three-stage curriculum to study zero-shot object-goal navigation (ZSON):
 
-We propose a <b>zero-shot</b> object-goal navigation framework by constructing an online 3D scene graph to prompt LLMs. Our method can be directly applied to different kinds of scenes and categories <b>without training</b>.
+1. **Reproduce** two 2D baselines — CLIP-based semantic mapping (ZSON) and vision-language frontier evaluation (VLFM).
+2. **Reproduce** the LLM-driven 3D scene graph planner SG-Nav on Matterport3D.
+3. **Propose** an *Exploration Memory* enhancement for SG-Nav that improves SR by **+3.33 pp** without adding any model parameters.
 
-
-## News
-- [2025/08/01]: [GC-VLN](https://github.com/bagh2178/GC-VLN) is accepted to CoRL 2025! This is a further extension of our scene graph-based navigation series which solves the problem of vision-and-language navigation with graph constraint.
-- [2025/02/27]: [UniGoal](https://github.com/bagh2178/UniGoal), an extended version of SG-Nav which unifies different goal-oriented navigation tasks, is accepted to CVPR 2025!
-- [2024/12/30]: We update the code and simplify the installation.
-- [2024/09/26]: SG-Nav is accepted to NeurIPS 2024!
+The Exploration Memory augments each room node in the scene graph with a persistent status field and a list of structured visit records. A background *Memory Writer* (LLM-B) asynchronously records exploration outcomes after the agent leaves a room; a *Room Selector* (LLM-A) reads these records to avoid redundant re-exploration.
 
 
-## Demo
-### Scene1:
-![demo](./assets/demo1.gif)
+## Results
 
-### Scene2:
-![demo](./assets/demo2.gif)
+| Method | Dataset | SR (%) | SPL (%) |
+|---|---|---|---|
+| ZSON (paper) | MP3D | 4.80 | 15.30 |
+| ZSON (ours) | MP3D | 4.30 | 14.00 |
+| VLFM (paper) | HM3D | 52.50 | 30.40 |
+| VLFM (ours) | HM3D | 52.30 | 30.24 |
+| SG-Nav (paper) | MP3D | 40.00 | 16.00 |
+| SG-Nav (ours, val_mini) | MP3D | 36.67 | 11.33 |
+| **SG-Nav + Memory (ours)** | MP3D | **40.00** | **12.47** |
 
-Demos are a little bit large; please wait a moment to load them. Welcome to the home page for more complete demos and detailed introductions.
+Evaluation on MP3D val_mini (30 episodes, 1 scene). All LLM calls use `llama3.2-vision` via Ollama.
 
 
 ## Method
 
-Method Pipeline:
-![overview](./assets/pipeline.png)
+### Three-Stage Roadmap
 
-### Dual-LLM Architecture
+![pipeline](./assets/pipeline.png)
 
-This version extends the original SG-Nav with a two-LLM design for more informed navigation:
+Each stage addresses the limitations of the previous one: 2D maps lose depth and object relations → SG-Nav adds a 3D scene graph + LLM reasoning → our Memory layer gives LLM-A persistent exploration history.
 
-**LLM A — Room Choice (online)**  
-At each navigation step, LLM A receives the current scene graph and the room exploration memory written by LLM B, then predicts which room the agent should explore next. The memory context allows LLM A to avoid revisiting rooms already judged as low-priority and to account for multi-floor layouts.
+### Exploration Memory Architecture
 
-**LLM B — Exploration Review (asynchronous)**  
-LLM B fires asynchronously in a background daemon thread whenever a room transitions from *active* (currently chosen) to *abandoned* (de-prioritised). It writes a structured record for that room covering:
+The key limitation of vanilla SG-Nav is **amnesia**: each planning step presents a fresh scene-graph snapshot with no record of which rooms were visited or why they were abandoned. We add a two-component memory layer stored directly on existing scene-graph nodes — no architectural changes beyond `scenegraph.py`.
 
-| Field | Values |
-|---|---|
-| `coverage` | `full` / `partial` / `minimal` |
-| `priority` | `high` / `medium` / `low` |
-| `confidence` | `high` / `medium` / `low` |
-| `note` | one-sentence summary |
-| `other_floors_detected` | `yes` / `no` |
+**Room node extensions**
 
-Each room's records accumulate in `RoomNode.memory`. LLM A reads the latest record per room when selecting the next exploration target. The `other_floors_detected` flag is also propagated to a shared `global_memory` dict that persists across rooms for the episode.
+Each `RoomNode` gains:
+- `memory` — a list of structured dicts, one per visit (written by LLM-B)
+- `status` — one of `unvisited | active | abandoned`
 
-**Room status state machine**
+A `SceneGraph`-level dict stores episode-wide cues: `other_floors`, `staircase_pos`.
+
+**Status state machine and LLM-B trigger**
 
 ```
 unvisited ──→ active ──→ abandoned
-                 ↑____________|
+                 ↑_____________|
            (re-chosen next step)
 ```
 
-LLM B is triggered exactly on the `active → abandoned` transition, at most once per `insert_goal()` call.
+After `insert_goal()` identifies the chosen room:
+1. The chosen room becomes `active`.
+2. Any room that was `active` last round (now de-prioritised) becomes `abandoned` and fires `_trigger_llm_b()`.
+
+Only `active → abandoned` transitions trigger LLM-B — **at most one call per planning step**.
+
+**Asynchronous Memory Writer (LLM-B)**
+
+LLM-B runs in a Python daemon thread so the main navigation loop is never blocked. Its prompt includes the goal category, detected objects in the room, and the previous memory record. It outputs exactly five structured lines:
+
+```
+coverage: <full|partial|minimal>
+priority: <high|medium|low>
+confidence: <high|medium|low>
+note: <one sentence>
+other_floors_detected: <yes|no>
+```
+
+The parsed record is appended to `room_node.memory`. If `other_floors_detected: yes`, a global `other_floors` flag is set for the rest of the episode.
+
+**Memory-augmented Room Selector (LLM-A)**
+
+Before querying LLM-A, `_build_room_memory_text()` serialises the most recent record of every room with non-empty memory and injects it into the prompt:
+
+```
+bedroom: visited 2x, coverage=partial, priority=medium, note=left corner unexplored
+```
+
+This gives LLM-A persistent context to avoid cycling back to low-priority rooms.
 
 
 ## Installation
 
-**Step 1 (Dataset)**
+**Step 1 — Dataset**
 
-Download [Matterport3D scene dataset](https://niessner.github.io/Matterport/) and [object-goal navigation episodes dataset](https://github.com/facebookresearch/habitat-lab/blob/main/DATASETS.md) from [here](https://cloud.tsinghua.edu.cn/f/03e0ca1430a344efa72b/?dl=1).
+Download the [Matterport3D scene dataset](https://niessner.github.io/Matterport/) and [object-goal navigation episodes](https://github.com/facebookresearch/habitat-lab/blob/main/DATASETS.md) from [here](https://cloud.tsinghua.edu.cn/f/03e0ca1430a344efa72b/?dl=1).
 
-Set your scene dataset path `SCENES_DIR` and episode dataset path `DATA_PATH` in config file `configs/challenge_objectnav2021.local.rgbd.yaml`.
+Set `SCENES_DIR` and `DATA_PATH` in `configs/challenge_objectnav2021.local.rgbd.yaml`.
 
-The structure of the dataset is outlined as follows:
 ```
 MatterPort3D/
 ├── mp3d/
 │   ├── 2azQ1b91cZZ/
 │   │   └── 2azQ1b91cZZ.glb
-│   ├── 8194nk5LbLH/
-│   │   └── 8194nk5LbLH.glb
 │   └── ...
 └── objectnav/
     └── mp3d/
@@ -86,85 +108,84 @@ MatterPort3D/
             └── val/
                 ├── content/
                 │   ├── 2azQ1b91cZZ.json.gz
-                │   ├── 8194nk5LbLH.json.gz
                 │   └── ...
                 └── val.json.gz
 ```
 
-**Step 2 (Environment)**
+**Step 2 — Environment**
 
-Create conda environment with python==3.9.
-```
+```bash
 conda create -n SG_Nav python==3.9
 ```
 
-**Step 3 (Simulator)**
+**Step 3 — Simulator**
 
-Install habitat-sim==0.2.4 and habitat-lab.
-```
+```bash
 conda install habitat-sim==0.2.4 -c conda-forge -c aihabitat
 pip install -e habitat-lab
-```
-Then replace the `agent/agent.py` in the installed habitat-sim package with `tools/agent.py` in our repository.
-```
 HABITAT_SIM_PATH=$(pip show habitat_sim | grep 'Location:' | awk '{print $2}')
 cp tools/agent.py ${HABITAT_SIM_PATH}/habitat_sim/agent/
 ```
 
-**Step 4 (Package)**
+**Step 4 — Packages**
 
-Install pytorch<=1.9, pytorch3d and faiss. Install other packages.
-```
+```bash
 conda install -c pytorch faiss-gpu=1.8.0
 pip install torch==1.9.1+cu111 torchvision==0.10.1+cu111 -f https://download.pytorch.org/whl/torch_stable.html
 pip install -r requirements.txt
 pip install "git+https://github.com/facebookresearch/pytorch3d.git"
 ```
 
-Install Grounded SAM.
-```
+Install Grounded SAM:
+```bash
 pip install -e segment_anything
 pip install --no-build-isolation -e GroundingDINO
 wget -O data/models/sam_vit_h_4b8939.pth https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth
 wget -O data/models/groundingdino_swint_ogc.pth https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
 ```
 
-Install GLIP model and download GLIP checkpoint.
-```
+Install GLIP:
+```bash
 cd GLIP
 python setup.py build develop --user
-mkdir MODEL
-cd MODEL
+mkdir MODEL && cd MODEL
 wget https://huggingface.co/GLIPModel/GLIP/resolve/main/glip_large_model.pth
 cd ../../
 ```
 
-Install Ollama and pull the model used by both LLM A and LLM B.
-```
+Install Ollama and pull the LLM used by both LLM-A and LLM-B:
+```bash
 curl -fsSL https://ollama.com/install.sh | sh
 ollama pull llama3.2-vision
 ```
 
+
 ## Evaluation
 
-Run SG-Nav:
-```
+```bash
 python SG_Nav.py --visualize
 ```
 
-The `--visualize` flag saves per-episode MP4 videos to `data/visualization/`. Each frame shows:
-- **Observation** — current RGB view with goal category label
-- **Occupancy Map** — agent position and trajectory
-- **Scene Graph Nodes / Edges** — objects and spatial relations in the 3D scene graph
-- **LLM Room Choice** — LLM A's latest room selection reasoning
-- **LLM Review** — LLM B's latest exploration record for the room just abandoned
+The `--visualize` flag saves per-episode MP4 videos to `data/visualization/`. Each frame displays:
 
-## Citation
+| Panel | Content |
+|---|---|
+| Observation | Current RGB view with goal category label |
+| Occupancy Map | Agent position and trajectory |
+| Scene Graph Nodes / Edges | Detected objects and spatial relations |
+| LLM Room Choice | LLM-A's latest room selection |
+| LLM Review | LLM-B's latest exploration record for the abandoned room |
+
+
+## Acknowledgements
+
+This project builds on [SG-Nav](https://github.com/bagh2178/SG-Nav) (Yin et al., NeurIPS 2024). We thank the original authors for releasing their code.
+
 ```
-@article{yin2024sgnav, 
-      title={SG-Nav: Online 3D Scene Graph Prompting for LLM-based Zero-shot Object Navigation}, 
-      author={Hang Yin and Xiuwei Xu and Zhenyu Wu and Jie Zhou and Jiwen Lu},
-      journal={arXiv preprint arXiv:2410.08189},
-      year={2024}
+@article{yin2024sgnav,
+  title={SG-Nav: Online 3D Scene Graph Prompting for LLM-based Zero-shot Object Navigation},
+  author={Hang Yin and Xiuwei Xu and Zhenyu Wu and Jie Zhou and Jiwen Lu},
+  journal={arXiv preprint arXiv:2410.08189},
+  year={2024}
 }
 ```
