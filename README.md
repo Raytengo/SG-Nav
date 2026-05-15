@@ -27,10 +27,41 @@ We propose a <b>zero-shot</b> object-goal navigation framework by constructing a
 Demos are a little bit large; please wait a moment to load them. Welcome to the home page for more complete demos and detailed introductions.
 
 
-## Method 
+## Method
 
 Method Pipeline:
 ![overview](./assets/pipeline.png)
+
+### Dual-LLM Architecture
+
+This version extends the original SG-Nav with a two-LLM design for more informed navigation:
+
+**LLM A — Room Choice (online)**  
+At each navigation step, LLM A receives the current scene graph and the room exploration memory written by LLM B, then predicts which room the agent should explore next. The memory context allows LLM A to avoid revisiting rooms already judged as low-priority and to account for multi-floor layouts.
+
+**LLM B — Exploration Review (asynchronous)**  
+LLM B fires asynchronously in a background daemon thread whenever a room transitions from *active* (currently chosen) to *abandoned* (de-prioritised). It writes a structured record for that room covering:
+
+| Field | Values |
+|---|---|
+| `coverage` | `full` / `partial` / `minimal` |
+| `priority` | `high` / `medium` / `low` |
+| `confidence` | `high` / `medium` / `low` |
+| `note` | one-sentence summary |
+| `other_floors_detected` | `yes` / `no` |
+
+Each room's records accumulate in `RoomNode.memory`. LLM A reads the latest record per room when selecting the next exploration target. The `other_floors_detected` flag is also propagated to a shared `global_memory` dict that persists across rooms for the episode.
+
+**Room status state machine**
+
+```
+unvisited ──→ active ──→ abandoned
+                 ↑____________|
+           (re-chosen next step)
+```
+
+LLM B is triggered exactly on the `active → abandoned` transition, at most once per `insert_goal()` call.
+
 
 ## Installation
 
@@ -108,7 +139,7 @@ wget https://huggingface.co/GLIPModel/GLIP/resolve/main/glip_large_model.pth
 cd ../../
 ```
 
-Install Ollama.
+Install Ollama and pull the model used by both LLM A and LLM B.
 ```
 curl -fsSL https://ollama.com/install.sh | sh
 ollama pull llama3.2-vision
@@ -120,6 +151,13 @@ Run SG-Nav:
 ```
 python SG_Nav.py --visualize
 ```
+
+The `--visualize` flag saves per-episode MP4 videos to `data/visualization/`. Each frame shows:
+- **Observation** — current RGB view with goal category label
+- **Occupancy Map** — agent position and trajectory
+- **Scene Graph Nodes / Edges** — objects and spatial relations in the 3D scene graph
+- **LLM Room Choice** — LLM A's latest room selection reasoning
+- **LLM Review** — LLM B's latest exploration record for the room just abandoned
 
 ## Citation
 ```
