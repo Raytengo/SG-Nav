@@ -31,15 +31,11 @@ Evaluation on MP3D val_mini (30 episodes, 1 scene). All LLM calls use `llama3.2-
 
 ## Method
 
-### Three-Stage Roadmap
+### Exploration Memory Architecture
 
 ![pipeline](./assets/pipeline.png)
 
-Each stage addresses the limitations of the previous one: 2D maps lose depth and object relations → SG-Nav adds a 3D scene graph + LLM reasoning → our Memory layer gives LLM-A persistent exploration history.
-
-### Exploration Memory Architecture
-
-The key limitation of vanilla SG-Nav is **amnesia**: each planning step presents a fresh scene-graph snapshot with no record of which rooms were visited or why they were abandoned. We add a two-component memory layer stored directly on existing scene-graph nodes — no architectural changes beyond `scenegraph.py`.
+LLM-A plans with room-level memories, while LLM-B asynchronously summarizes explored rooms.
 
 **Room node extensions**
 
@@ -59,7 +55,7 @@ unvisited ──→ active ──→ abandoned
 
 After `insert_goal()` identifies the chosen room:
 1. The chosen room becomes `active`.
-2. Any room that was `active` last round (now de-prioritised) becomes `abandoned` and fires `_trigger_llm_b()`.
+2. Any room that was `active` last round becomes `abandoned` and fires `_trigger_llm_b()`.
 
 Only `active → abandoned` transitions trigger LLM-B — **at most one call per planning step**.
 
@@ -79,7 +75,7 @@ The parsed record is appended to `room_node.memory`. If `other_floors_detected: 
 
 **Memory-augmented Room Selector (LLM-A)**
 
-Before querying LLM-A, `_build_room_memory_text()` serialises the most recent record of every room with non-empty memory and injects it into the prompt:
+Before querying LLM-A, the most recent record of every visited room is serialised and injected into the prompt:
 
 ```
 bedroom: visited 2x, coverage=partial, priority=medium, note=left corner unexplored
@@ -159,33 +155,8 @@ curl -fsSL https://ollama.com/install.sh | sh
 ollama pull llama3.2-vision
 ```
 
-
-## Evaluation
+**Step 5 — Run**
 
 ```bash
 python SG_Nav.py --visualize
-```
-
-The `--visualize` flag saves per-episode MP4 videos to `data/visualization/`. Each frame displays:
-
-| Panel | Content |
-|---|---|
-| Observation | Current RGB view with goal category label |
-| Occupancy Map | Agent position and trajectory |
-| Scene Graph Nodes / Edges | Detected objects and spatial relations |
-| LLM Room Choice | LLM-A's latest room selection |
-| LLM Review | LLM-B's latest exploration record for the abandoned room |
-
-
-## Acknowledgements
-
-This project builds on [SG-Nav](https://github.com/bagh2178/SG-Nav) (Yin et al., NeurIPS 2024). We thank the original authors for releasing their code.
-
-```
-@article{yin2024sgnav,
-  title={SG-Nav: Online 3D Scene Graph Prompting for LLM-based Zero-shot Object Navigation},
-  author={Hang Yin and Xiuwei Xu and Zhenyu Wu and Jie Zhou and Jiwen Lu},
-  journal={arXiv preprint arXiv:2410.08189},
-  year={2024}
-}
 ```
